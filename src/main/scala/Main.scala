@@ -7,28 +7,23 @@ import scala.language.implicitConversions
 
 object Main {
 
-  trait Simplifiable {
-    def simplify: ValidationNel[String, Double]
-  }
-
-  sealed trait Operator {
-    def op: (Double, Double) => Double
-  }
-
-  case object Plus   extends Operator { def op = _ + _ }
-  case object Minus  extends Operator { def op = _ - _ }
-  case object Times  extends Operator { def op = _ * _ }
-  case object Divide extends Operator { def op = _ / _ }
-  case object Modulo extends Operator { def op = _ % _ }
-
   sealed trait Expr
-
   case class OpExpr(lhs: Expr, op: Operator, rhs: Expr) extends Expr
-
   case class NumExpr(i: Double) extends Expr
-
   case class BraceExpr(lhs: String, exp: Expr, rhs: String) extends Expr
 
+  trait Simplifiable { def simplify: ValidationNel[String, Double] }
+
+  type Operator   = (Double, Double) => Double
+  type Result     = ValidationNel[String, Double]
+  type Expression = ValidationNel[String, Expr]
+
+  val Plus   : Operator = _ + _
+  val Minus  : Operator = _ - _
+  val Times  : Operator = _ * _
+  val Divide : Operator = _ / _
+  val Modulo : Operator = _ % _
+  
   val RE_SPACEL = " (.*)".r
   val RE_SPACER = "(.*) ".r
   val RE_BRACE  = "(.*)\\(([^\\(\\)]*)\\)(.*)".r
@@ -39,7 +34,7 @@ object Main {
   val RE_DIVIDE = "(.*)\\/(.*)".r
   val RE_MODULO = "(.*)\\%(.*)".r
 
-  def toExpr(in: String): ValidationNel[String, Expr] = in match {
+  def toExpr(input: String): Expression = input match {
     case RE_SPACEL(sub)        => toExpr(sub)
     case RE_SPACER(sub)        => toExpr(sub)
     case RE_BRACE(l, m, r)     => toExpr(m) map { x => BraceExpr(l, x, r) }
@@ -53,40 +48,36 @@ object Main {
   }
 
   implicit def toSimplifiable(expr: Expr): Simplifiable = new Simplifiable {
-    def simplify: ValidationNel[String, Double] = expr match {
+    def simplify: Result = expr match {
       case NumExpr(i) => i.successNel[String]
-      case OpExpr(lhs, op, rhs) =>
-        try {
-          (lhs.simplify |@| rhs.simplify) { (l, r) =>
-            op.op(l, r)
-          }
-        } catch {
-          case e: ArithmeticException => e.getMessage.failureNel[Double]
-        }
+      case OpExpr(lhs, op, rhs) => (lhs.simplify |@| rhs.simplify) { (l, r) => op(l, r) }
       case BraceExpr(lhs, exp, rhs) =>
-        exp.simplify flatMap { s => 
-          toExpr(s"$lhs $s $rhs").flatMap(_.simplify)
-        }
+        for {
+          s           <- exp.simplify
+          surrounding <- toExpr(s"$lhs $s $rhs")
+          simplified  <- surrounding.simplify
+        } yield simplified
     }
   }
 
-  def parseLine(in: String): IO[Unit] =
-    toExpr(in) flatMap { _.simplify } match {
-        case Success(result) => showSuccess(result)
-        case Failure(errors) => errors foldMap showError
+  implicit val showResult: Show[Result] = Show.shows[Result] {
+    _ match {
+      case Success(result) => s"    ✓> ${result.show}"
+      case Failure(errors) => errors.map { e => s"    ✗> ${e.show}" }.toList.mkString("\n")
     }
+  }
 
-  val showSuccess: (Double) => IO[Unit] = (r) => putStrLn(s"    ✓> ${r.show}")
+  def simplifyExpression(expr: Expression): Result = expr.flatMap { _.simplify }
 
-  val showError: (String) => IO[Unit] = (e) => putStrLn(s"    ✗> ${e.show}")
-
-  def loop(): IO[Unit] =
+  def loop: IO[Unit] =
     for {
       _      <- putStr("calcƶ> ")
       input  <- readLn
-      exit   =  input === "exit"
-      _      <- parseLine(input).whenM(!exit)
-      _      <- loop.whenM(!exit)
+      done   =  input === "exit"
+      expr   =  toExpr(input)            // How can i NOT do this calculation if exit was passed?
+      result =  simplifyExpression(expr) // ... and that one too
+      _      <- putStrLn(result.shows).whenM(!done)
+      _      <- loop.whenM(!done)
     } yield ()
 
   def main(args: Array[String]): Unit =
